@@ -247,19 +247,9 @@ class VESDE(SDE):
     """SMLD(NCSN) discretization."""
     timestep = (t * (self.N - 1) / self.T).long()
     sigma = self.discrete_sigmas.to(t.device)[timestep]
-
-    print(f"timestep device: {timestep.device}, shape: {timestep.shape}")
-    print(f"sigma device: {sigma.device}, shape: {sigma.shape}")
-    print(f"x device: {x.device}, shape: {x.shape}")
-    print(f"t device: {t.device}, shape: {t.shape}")
-    print(f"discrete sigmas device: {self.discrete_sigmas.device}, shape: {self.discrete_sigmas.shape}")
-
-    adjacent_sigma = torch.where(timestep.cpu() == 0, 
-                                 torch.zeros_like(t, device='cpu').cpu(),
-                                 self.discrete_sigmas[timestep - 1].cpu())
-    
-    print(f"adjacent sigma device: {adjacent_sigma.device}, shape: {adjacent_sigma.shape}")
-    adjacent_sigma = adjacent_sigma.to(t.device)
+    adjacent_sigma = torch.where(timestep == 0, 
+                                 torch.zeros_like(t),
+                                 self.discrete_sigmas[timestep.cpu() - 1]).to(t.device)
     f = torch.zeros_like(x)
     G = torch.sqrt(sigma ** 2 - adjacent_sigma ** 2)
     return f, G

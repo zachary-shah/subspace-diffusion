@@ -1,25 +1,15 @@
-import gc, io, os, random, time, logging, wandb, torch
+import os, torch
 import numpy as np
 import tensorflow as tf
-from models import ddpm, ncsnpp
-import losses, sampling, datasets, likelihood, sde_lib
+import losses, sampling, datasets, sde_lib
 from models import utils as mutils
 from models.ema import ExponentialMovingAverage
-from torch.utils import tensorboard
-from torchvision.utils import make_grid, save_image
 from utils import restore_checkpoint
 from upsampling import upsampling_fn
-from absl import app, flags
 from ml_collections.config_flags import config_flags
 from configs.ve.cifar10_ncsnpp_continuous import get_config
 
 #import evaluation
-
-def _get_def_flag():
-    FLAGS = flags.FLAGS
-    config_flags.DEFINE_config_file(
-        "config", 'configs/ve/cifar10_ncsnpp_continuous.py', "Training configuration.", lock_config=True)
-    return FLAGS
 
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
@@ -47,6 +37,7 @@ def sample(
 
     config = get_config()
     config.eval.batch_size = batch
+    config.device = device
     
     eval_dir = os.path.join(eval_folder)
     os.makedirs(eval_dir, exist_ok=True)
@@ -105,7 +96,7 @@ def sample(
             
             config.data.image_size = size = step['size']
             start, end = step['start'], step['end']
-            sampling_fn, score_model = step['sampling_fn'].to(device), step['score_model'].to(device)
+            sampling_fn, score_model = step['sampling_fn'], step['score_model']
             langevin_fn = step['langevin_fn']
             
             if i != 0 and langevin_steps > 0:
@@ -117,6 +108,7 @@ def sample(
                         samples, _ = langevin_fn(samples, t_vec)
             
             if i == 0:
+                print(type(score_model))
                 samples, t_vec = sampling_fn(score_model, start=start, end=end)
                 samples = scaler(samples)
                
@@ -175,5 +167,4 @@ sample(
     subspace = 8,
     ckpt_subspace = './pretrained/cifar10_ncsn_8x8.pth',
     ckpt_full = './pretrained/cifar10_ncsn_full.pth',
-    device = 0,
 ) 
