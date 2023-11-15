@@ -7,27 +7,19 @@ from models import utils as mutils
 from models.ema import ExponentialMovingAverage
 from torch.utils import tensorboard
 from torchvision.utils import make_grid, save_image
-from utils import save_checkpoint, restore_checkpoint
+from utils import restore_checkpoint
 from upsampling import upsampling_fn
 from absl import app, flags
 from ml_collections.config_flags import config_flags
+from configs.ve.cifar10_ncsnpp_continuous import get_config
 
-FLAGS = flags.FLAGS
-config_flags.DEFINE_config_file(
-    "config", 'configs/ve/cifar10_ncsnpp_continuous.py', "Training configuration.", lock_config=True)
-flags.DEFINE_string("eval_folder", None, "Directory name for storing evaluation results")
-flags.DEFINE_string("save_name", None, "File name for saving generated sample")
-flags.DEFINE_integer("number_samples", 50000, "Number of samples")
-flags.DEFINE_integer("batch", 1000, "Batch size")
-flags.DEFINE_integer("langevin_steps", 2, "Number of conditional Langevin steps after upsampling")
-flags.DEFINE_boolean("conditional_langevin", True, "Use conditional Langevin instead of unconditional")
-flags.DEFINE_float("langevin_snr", 0.22, "Langevin SNR after upsampling")
-flags.DEFINE_float("time", 0.5, "Cutoff time to switch to full-dim model")
-flags.DEFINE_integer("subspace", 16, "Subspace dimension")
-flags.DEFINE_string("ckpt_subspace", None, "Subspace model checkpoint")
-flags.DEFINE_string("ckpt_full", None, "Full model checkpoint")
-flags.DEFINE_enum("dataset", "cifar", ["cifar", "celeba", "church"], "Dataset name")
-flags.mark_flags_as_required(["eval_folder", "save_name", "ckpt_subspace", "ckpt_full"])
+#import evaluation
+
+def _get_def_flag():
+    FLAGS = flags.FLAGS
+    config_flags.DEFINE_config_file(
+        "config", 'configs/ve/cifar10_ncsnpp_continuous.py', "Training configuration.", lock_config=True)
+    return FLAGS
 
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
@@ -37,13 +29,27 @@ if gpus:
     except RuntimeError as e:
         pass
 
-def main(argv):
+def sample(
+        eval_folder: str = None,
+        save_name: str = None,
+        number_samples: int = 10,
+        batch: int = 5,
+        langevin_steps: int = 2,
+        conditional_langevin: bool = True,
+        langevin_snr: float = 0.22,
+        time: float = 0.5,
+        subspace: int = 16,
+        ckpt_subspace: str = None,
+        ckpt_full: str = None,
+    ):  
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    config = get_config()
+    config.eval.batch_size = batch
     
-    FLAGS.config.eval.batch_size = FLAGS.batch
-    config = FLAGS.config
-    
-    eval_dir = os.path.join(FLAGS.eval_folder)
-    tf.io.gfile.makedirs(eval_dir)
+    eval_dir = os.path.join(eval_folder)
+    os.makedirs(eval_dir, exist_ok=True)
 
     # Create data normalizer and its inverse
     scaler = datasets.get_data_scaler(config)
@@ -59,14 +65,15 @@ def main(argv):
     sampling_eps = 1e-5
 
     steps = [
-        {'size': FLAGS.subspace, 'pth': FLAGS.ckpt_subspace,
-         'start': 1., 'end': FLAGS.time},
-        {'size': config.data.image_size, 'pth': FLAGS.ckpt_full,
-         'start': FLAGS.time, 'end': 0.},
+        {'size': subspace, 'pth': ckpt_subspace,
+         'start': 1., 'end': time},
+        {'size': config.data.image_size, 'pth': ckpt_full,
+         'start': time, 'end': 0.},
     ]
-    
+
     steps = [step for step in steps if step['start'] != step['end']]
-    print(f"Sampling steps: {steps}")
+
+    print(f"Preparing models...")
     for i, step in enumerate(steps):
 
         config.data.image_size = step['size']
@@ -77,8 +84,8 @@ def main(argv):
         step['state'] = restore_checkpoint(step['pth'], state, device=config.device)
         ema.copy_to(score_model.parameters())
         
-        step['langevin_fn'] = langevin_fn = sampling.LangevinCorrector(sde, score_model, FLAGS.langevin_snr,
-                                                                           FLAGS.langevin_steps).update_fn  
+        step['langevin_fn'] = langevin_fn = sampling.LangevinCorrector(sde, score_model, langevin_snr,
+                                                                           langevin_steps).update_fn  
 
         sampling_shape = (config.eval.batch_size,
                           config.data.num_channels,
@@ -89,20 +96,21 @@ def main(argv):
                                                                      sampling_eps, denoise=denoise)
 
     all_samples = []
-    num_sampling_rounds = (FLAGS.number_samples - 1) // config.eval.batch_size + 1
+    num_sampling_rounds = (number_samples - 1) // config.eval.batch_size + 1
     
+    print(f"Sampling {num_sampling_rounds}...")
     for r in range(num_sampling_rounds):    
 
         for i, step in enumerate(steps):
             
             config.data.image_size = size = step['size']
             start, end = step['start'], step['end']
-            sampling_fn, score_model = step['sampling_fn'], step['score_model']
+            sampling_fn, score_model = step['sampling_fn'].to(device), step['score_model'].to(device)
             langevin_fn = step['langevin_fn']
             
-            if i != 0 and FLAGS.langevin_steps > 0:
+            if i != 0 and langevin_steps > 0:
                 with torch.no_grad() :
-                    if FLAGS.conditional_langevin:
+                    if conditional_langevin:
                         remove_subspace = int(np.log2(size/steps[i-1]['size']))
                         samples, _ = langevin_fn(samples, t_vec, remove_subspace=remove_subspace)
                     else:
@@ -121,7 +129,7 @@ def main(argv):
                     sigma_min, sigma_max = config.model.sigma_min, config.model.sigma_max
                     sigma = sigma_min * (sigma_max / sigma_min) ** t
                     alpha = 1
-                    samples = upsampling_fn(samples, alpha=alpha, sigma=sigma, dataset=FLAGS.dataset)
+                    samples = upsampling_fn(samples, alpha=alpha, sigma=sigma, dataset='cifar')
                 
                 elif config.training.sde == 'subvpsde':
                     beta_min, beta_max = config.model.beta_min, config.model.beta_max
@@ -136,9 +144,8 @@ def main(argv):
                     elif size == 16:
                         samples = samples - 1*alpha
                        
-                    samples = upsampling_fn(samples, alpha=2*alpha, sigma=sigma, dataset=FLAGS.dataset)
+                    samples = upsampling_fn(samples, alpha=2*alpha, sigma=sigma, dataset='cifar')
                 
-
         samples = samples.permute(0, 2, 3, 1).cpu().numpy() 
         samples = np.clip(samples * 255., 0, 255).astype(np.uint8)
         samples = samples.reshape(
@@ -147,15 +154,26 @@ def main(argv):
         all_samples.append(samples)
         
     all_samples = np.concatenate(all_samples)
-    path = os.path.join(eval_dir, f"{FLAGS.save_name}.npy")
+    path = os.path.join(eval_dir, f"{save_name}.npy")
     np.save(path, all_samples)    
     del steps, step, state, ema, score_model, sampling_fn, samples
     torch.cuda.empty_cache()
-    
-    if FLAGS.dataset != 'cifar': return
-    import evaluation
-    is_, fid, kid = evaluation.evaluate_samples(all_samples)
-    print('IS', is_, 'FID', fid, 'KID', kid)
+        
+    # evaluate FID, IS, KID
+    # is_, fid, kid = evaluation.evaluate_samples(all_samples)
+    # print('IS', is_, 'FID', fid, 'KID', kid)
 
-if __name__ == "__main__":
-    app.run(main)
+sample(
+    eval_folder="./eval",
+    save_name="test_run",
+    number_samples = 10,
+    batch = 5,
+    langevin_steps = 2,
+    conditional_langevin = True,
+    langevin_snr = 0.22,
+    time = 0.5,
+    subspace = 8,
+    ckpt_subspace = './pretrained/cifar10_ncsn_8x8.pth',
+    ckpt_full = './pretrained/cifar10_ncsn_full.pth',
+    device = 0,
+) 
