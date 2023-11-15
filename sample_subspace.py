@@ -1,15 +1,17 @@
-import os, torch
+import gc, io, os, random, time, logging, wandb, torch
 import numpy as np
 import tensorflow as tf
-import losses, sampling, datasets, sde_lib
+from models import ddpm, ncsnpp
+import losses, sampling, datasets, likelihood, sde_lib
 from models import utils as mutils
 from models.ema import ExponentialMovingAverage
+from torch.utils import tensorboard
+from torchvision.utils import make_grid, save_image
 from utils import restore_checkpoint
 from upsampling import upsampling_fn
+from absl import app, flags
 from ml_collections.config_flags import config_flags
 from configs.ve.cifar10_ncsnpp_continuous import get_config
-
-#import evaluation
 
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
@@ -20,18 +22,22 @@ if gpus:
         pass
 
 def sample(
-        eval_folder: str = None,
-        save_name: str = None,
+        subspace: int = 16,
+        time: float = 0.5,
         number_samples: int = 10,
         batch: int = 5,
         langevin_steps: int = 2,
         conditional_langevin: bool = True,
         langevin_snr: float = 0.22,
-        time: float = 0.5,
-        subspace: int = 16,
-        ckpt_subspace: str = None,
-        ckpt_full: str = None,
     ):  
+
+    if subspace == 8:
+        ckpt_subspace = './pretrained/cifar10_ncsn_8x8.pth'
+    elif subspace == 16:
+        ckpt_subspace = './pretrained/cifar10_ncsn_16x16.pth'
+    else:
+        raise NotImplementedError("Subspace count must be either 8 or 16.")
+    ckpt_full: str = './pretrained/cifar10_ncsn_full.pth'
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -39,8 +45,7 @@ def sample(
     config.eval.batch_size = batch
     config.device = device
     
-    eval_dir = os.path.join(eval_folder)
-    os.makedirs(eval_dir, exist_ok=True)
+    
 
     # Create data normalizer and its inverse
     scaler = datasets.get_data_scaler(config)
@@ -48,7 +53,6 @@ def sample(
 
     ###################################
     # Setup SDEs
-    
     if config.training.sde == "vesde":
         sde = sde_lib.VESDE(sigma_min=config.model.sigma_min, sigma_max=config.model.sigma_max, N=config.model.num_scales)
     elif config.training.sde == "subvpsde":
@@ -125,12 +129,11 @@ def sample(
                 
                 elif config.training.sde == 'subvpsde':
                     beta_min, beta_max = config.model.beta_min, config.model.beta_max
-                    beta = beta_min + (beta_max - beta_min)*t
                     Beta = 1/2*t**2*(beta_max-beta_min) + t*beta_min
                     sigma = 1-np.exp(-Beta)
                     alpha = np.exp(-Beta/2)
                      
-                    # These adjustments are necessary because of the data scaler used to train DDPM++ models.  Works for CIFAR-10 ONLY!
+                    # These adjustments are necessary because of the data scaler used to train DDPM++ models.
                     if size == 8:
                         samples = samples - 3*alpha
                     elif size == 16:
@@ -146,25 +149,31 @@ def sample(
         all_samples.append(samples)
         
     all_samples = np.concatenate(all_samples)
-    path = os.path.join(eval_dir, f"{save_name}.npy")
-    np.save(path, all_samples)    
     del steps, step, state, ema, score_model, sampling_fn, samples
     torch.cuda.empty_cache()
-        
-    # evaluate FID, IS, KID
-    # is_, fid, kid = evaluation.evaluate_samples(all_samples)
-    # print('IS', is_, 'FID', fid, 'KID', kid)
 
-sample(
-    eval_folder="./eval",
-    save_name="test_run",
+    return all_samples
+
+samples = sample(
+    subspace = 8,
+    time = 0.5,
     number_samples = 10,
     batch = 5,
     langevin_steps = 2,
     conditional_langevin = True,
     langevin_snr = 0.22,
-    time = 0.5,
-    subspace = 8,
-    ckpt_subspace = './pretrained/cifar10_ncsn_8x8.pth',
-    ckpt_full = './pretrained/cifar10_ncsn_full.pth',
 ) 
+
+# save
+eval_dir = "./eval"
+os.makedirs(eval_dir, exist_ok=True)
+save_name = "test_run"
+np.save(f"{eval_dir}/{save_name}.npy", samples)
+
+## TODO: evaluate
+def evaluate(samples):
+    pass   
+    # evaluate FID, IS, KID
+    # is_, fid, kid = evaluation.evaluate_samples(samples)
+    # print('IS', is_, 'FID', fid, 'KID', kid)
+
