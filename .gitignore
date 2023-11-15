@@ -1,0 +1,9 @@
+
+cifar10/*
+pretrained/*
+assets/stats/cifar10_stats.npz
+
+op/__pycache__/*
+models/__pycache__/*
+__pycache__/*
+
