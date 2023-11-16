@@ -1,3 +1,7 @@
+# EE269 Subspace Diffusion Generative Models Fork
+
+This repo was adapted for an EE269 HW assignment for Fall 2023. Credit of original work to B Jing,* G Corso,* R Berlinghieri, T Jaakkola.
+
 # Subspace Diffusion Generative Models
 
 [![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/subspace-diffusion-generative-models/image-generation-on-cifar-10)](https://paperswithcode.com/sota/image-generation-on-cifar-10?p=subspace-diffusion-generative-models)
